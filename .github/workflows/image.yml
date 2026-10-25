@@ -5,6 +5,9 @@
 #   image.tag_suffix   → appended to the SHA (optional)
 #   image.platforms    → default linux/arm64 (the Mac mini zones)
 #
+# A second app in the same repo has its own manifest (e.g. gateway/platform.yml) and its own
+# workflow passing `manifest:`; the build context defaults to the manifest's folder.
+#
 # Use it from the app repo (the job needs packages: write):
 #   jobs:
 #     image:
@@ -16,9 +19,13 @@ on:
   workflow_call:
     inputs:
       manifest:
-        description: Path of the app's manifest
+        description: Path of the app's manifest (e.g. gateway/platform.yml for a second app in the repo)
         type: string
         default: platform.yml
+      context:
+        description: Docker build context; default the manifest's folder (its Dockerfile is <context>/Dockerfile)
+        type: string
+        default: ''
       prebuild:
         description: Shell command run before the build (e.g. fetching release assets into the build context)
         type: string
@@ -48,6 +55,7 @@ jobs:
         id: m
         env:
           MANIFEST: ${{ inputs.manifest }}
+          CONTEXT: ${{ inputs.context }}
         run: |
           set -euo pipefail
           command -v yq >/dev/null || {
@@ -69,6 +77,7 @@ jobs:
             echo "tag=$tag"
             echo "platforms=$platforms"
             echo "cross=$([[ "$platforms" == *amd64* ]] && echo true || echo false)"
+            echo "context=${CONTEXT:-$(dirname "$MANIFEST")}"
           } >> "$GITHUB_OUTPUT"
           echo "Building $registry:$tag for $platforms (service=$app)"
 
@@ -91,7 +100,7 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ steps.m.outputs.context }}
           platforms: ${{ steps.m.outputs.platforms }}
           push: true
           tags: ${{ steps.m.outputs.image }}
