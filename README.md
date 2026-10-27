@@ -20,7 +20,15 @@ jobs:
 
 Optional inputs: `manifest` (default `platform.yml`), `context` (the Docker build context;
 default the manifest's folder), `prebuild` (a shell command run before the build, with the
-`prebuild_token` secret as `GH_TOKEN`).
+`prebuild_token` secret as `GH_TOKEN`), `runner` (below).
+
+**Where it runs.** On GitHub's `ubuntu-24.04-arm` runner, unless `runner` or a
+`PLATFORM_RUNNER` variable on the calling repo or its organization names a self-hosted
+runner's label. Setting the variable on an organization moves all its repos' builds at once,
+and deleting it moves them back. A self-hosted runner needs Docker and, if it isn't arm64,
+QEMU registered for arm64 (e.g. Ubuntu's `qemu-user-static`). There the build uses the
+runner's Docker and its cache, not GitHub's cache. On either, no build record artifact is
+stored (GitHub bills artifacts and caches as Actions storage).
 
 A second app in the same repo keeps its own manifest and Dockerfile in a folder, and its own
 workflow that builds only when that folder changes:

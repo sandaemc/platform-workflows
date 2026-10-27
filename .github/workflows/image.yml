@@ -13,6 +13,11 @@
 #     image:
 #       uses: sandaemc/platform-workflows/.github/workflows/image.yml@v1
 #       permissions: { contents: read, packages: write }
+#
+# Where it runs: GitHub's arm64 runner, unless the `runner` input or the caller's PLATFORM_RUNNER
+# variable (repo or organization) names a self-hosted runner's label. There the cache stays in the
+# runner's own Docker instead of GitHub's cache. No build record is stored as an artifact on either
+# (GitHub bills artifacts and caches as storage).
 name: Image
 
 on:
@@ -30,6 +35,10 @@ on:
         description: Shell command run before the build (e.g. fetching release assets into the build context)
         type: string
         default: ''
+      runner:
+        description: Runner label; default the caller's PLATFORM_RUNNER variable, else GitHub's ubuntu-24.04-arm
+        type: string
+        default: ''
     secrets:
       prebuild_token:
         description: Exposed to the prebuild command as GH_TOKEN
@@ -41,8 +50,9 @@ on:
 
 jobs:
   image:
-    # Native arm64: QEMU emulation of native modules (node-gyp, .NET) is several times slower.
-    runs-on: ubuntu-24.04-arm
+    # GitHub's runner is native arm64. An x86_64 self-hosted runner builds arm64 under QEMU (it must
+    # have it registered), slower for native modules (node-gyp, .NET), made up for by its warm cache.
+    runs-on: ${{ inputs.runner || vars.PLATFORM_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
       packages: write
@@ -58,8 +68,9 @@ jobs:
           CONTEXT: ${{ inputs.context }}
         run: |
           set -euo pipefail
-          command -v yq >/dev/null || {
-            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_arm64
+          command -v yq >/dev/null || {   # a self-hosted runner may have it already
+            arch="$(case "$(uname -m)" in x86_64) echo amd64;; *) echo arm64;; esac)"
+            sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_$arch"
             sudo chmod +x /usr/local/bin/yq
           }
           [ -f "$MANIFEST" ] || { echo "::error::$MANIFEST not found: this workflow builds from the app's platform manifest"; exit 1; }
@@ -87,10 +98,14 @@ jobs:
           GH_TOKEN: ${{ secrets.prebuild_token }}
         run: ${{ inputs.prebuild }}
 
+      # GitHub's runners need QEMU set up here; a self-hosted runner registers it at boot itself.
       - uses: docker/setup-qemu-action@v3
-        if: steps.m.outputs.cross == 'true'
+        if: steps.m.outputs.cross == 'true' && runner.environment == 'github-hosted'
 
+      # On a self-hosted runner, build in its own Docker, whose cache is still there next time.
       - uses: docker/setup-buildx-action@v3
+        with:
+          driver: ${{ runner.environment == 'self-hosted' && 'docker' || 'docker-container' }}
 
       - uses: docker/login-action@v3
         with:
@@ -99,12 +114,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false   # the build record artifact counts as Actions storage
         with:
           context: ${{ steps.m.outputs.context }}
           platforms: ${{ steps.m.outputs.platforms }}
           push: true
           tags: ${{ steps.m.outputs.image }}
           labels: service=${{ steps.m.outputs.app }}
-          # One cache per app, so apps sharing this workflow don't evict each other's layers.
-          cache-from: type=gha,scope=${{ steps.m.outputs.app }}
-          cache-to: type=gha,mode=max,scope=${{ steps.m.outputs.app }}
+          # GitHub's runners: one cache per app, so apps sharing this workflow don't evict each
+          # other's layers. A self-hosted runner: none needed (the docker driver keeps its cache).
+          cache-from: ${{ runner.environment == 'github-hosted' && format('type=gha,scope={0}', steps.m.outputs.app) || '' }}
+          cache-to: ${{ runner.environment == 'github-hosted' && format('type=gha,mode=max,scope={0}', steps.m.outputs.app) || '' }}
